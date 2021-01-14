@@ -1,43 +1,144 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include "i2c_bus.h"
-#include "board.h"
-
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "driver/spi_master.h"
+#include "soc/gpio_struct.h"
+#include "driver/gpio.h"
+#include "esp_timer.h"
 #include "rc522.h"
 
-static i2c_bus_handle_t i2c_handle;
+spi_device_handle_t rc522_spi;
+static esp_timer_handle_t rc522_timer;
+static bool rc522_timer_running = false;
 
-static int i2c_addr = (0x28 << 1) | I2C_MASTER_WRITE;
+esp_err_t rc522_spi_init(int miso_io, int mosi_io, int sck_io, int sda_io) {
+    spi_bus_config_t buscfg = {
+        .miso_io_num = miso_io,
+        .mosi_io_num = mosi_io,
+        .sclk_io_num = sck_io,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1
+    };
 
-esp_err_t rc522_write_n(uint8_t reg, uint8_t n, uint8_t *data) {
-    return i2c_bus_write_bytes(i2c_handle, i2c_addr, &reg, sizeof(reg), data, n);
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 5000000,
+        .mode = 0,
+        .spics_io_num = sda_io,
+        .queue_size = 7,
+        .flags = SPI_DEVICE_HALFDUPLEX
+    };
+
+    esp_err_t ret;
+
+    ret = spi_bus_initialize(VSPI_HOST, &buscfg, 0);
+
+    if(ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = spi_bus_add_device(VSPI_HOST, &devcfg, &rc522_spi);
+
+    return ret;
 }
 
-esp_err_t rc522_write(uint8_t reg, uint8_t val) {
-    return rc522_write_n(reg, 1, &val);
+esp_err_t rc522_write_n(uint8_t addr, uint8_t n, uint8_t *data) {
+    uint8_t* buffer = (uint8_t*) malloc(n + 1);
+    buffer[0] = (addr << 1) & 0x7E;
+
+    for (uint8_t i = 1; i <= n; i++) {
+        buffer[i] = data[i-1];
+    }
+
+    spi_transaction_t t;
+    memset(&t, 0, sizeof(t));
+
+    t.length = 8 * (n + 1);
+    t.tx_buffer = buffer;
+
+    esp_err_t ret = spi_device_transmit(rc522_spi, &t);
+
+    free(buffer);
+
+    return ret;
 }
 
-uint8_t rc522_read(uint8_t reg) {
-    uint8_t data = 0xFF;
-    ESP_ERROR_CHECK(i2c_bus_read_bytes(i2c_handle, i2c_addr, &reg, sizeof(reg), &data, 1));
-    return data;
+
+esp_err_t rc522_write(uint8_t addr, uint8_t val) {
+    return rc522_write_n(addr, 1, &val);
 }
 
-esp_err_t rc522_set_bitmask(uint8_t reg, uint8_t mask) {
-    return rc522_write(reg, rc522_read(reg) | mask);
+/* Returns pointer to dynamically allocated array of N places. */
+uint8_t* rc522_read_n(uint8_t addr, uint8_t n) {
+    if (n <= 0) {
+        return NULL;
+    }
+
+    spi_transaction_t t;
+    memset(&t, 0, sizeof(t));
+
+    uint8_t* buffer = (uint8_t*) malloc(n);
+    
+    t.flags = SPI_TRANS_USE_TXDATA;
+    t.length = 8;
+    t.tx_data[0] = ((addr << 1) & 0x7E) | 0x80;
+    t.rxlength = 8 * n;
+    t.rx_buffer = buffer;
+
+    esp_err_t ret = spi_device_transmit(rc522_spi, &t);
+    assert(ret == ESP_OK);
+
+    return buffer;
 }
 
-esp_err_t rc522_clear_bitmask(uint8_t reg, uint8_t mask) {
-    return rc522_write(reg, rc522_read(reg) & ~mask);
+uint8_t rc522_read(uint8_t addr) {
+    uint8_t* buffer = rc522_read_n(addr, 1);
+    uint8_t res = buffer[0];
+    free(buffer);
+
+    return res;
+}
+
+esp_err_t rc522_init() {
+    // ---------- RW test ------------
+    rc522_write(0x24, 0x25);
+    assert(rc522_read(0x24) == 0x25);
+
+    rc522_write(0x24, 0x26);
+    assert(rc522_read(0x24) == 0x26);
+    // ------- End of RW test --------
+
+    rc522_write(0x01, 0x0F);
+    rc522_write(0x2A, 0x8D);
+    rc522_write(0x2B, 0x3E);
+    rc522_write(0x2D, 0x1E);
+    rc522_write(0x2C, 0x00);
+    rc522_write(0x15, 0x40);
+    rc522_write(0x11, 0x3D);
+
+    rc522_antenna_on();
+
+    printf("RC522 Firmware 0x%x\n", rc522_fw_version());
+
+    return ESP_OK;
+}
+
+esp_err_t rc522_set_bitmask(uint8_t addr, uint8_t mask) {
+    return rc522_write(addr, rc522_read(addr) | mask);
+}
+
+esp_err_t rc522_clear_bitmask(uint8_t addr, uint8_t mask) {
+    return rc522_write(addr, rc522_read(addr) & ~mask);
 }
 
 esp_err_t rc522_antenna_on() {
-    esp_err_t ret = ESP_OK;
+    esp_err_t ret;
 
     if(~ (rc522_read(0x14) & 0x03)) {
         ret = rc522_set_bitmask(0x14, 0x03);
+
         if(ret != ESP_OK) {
             return ret;
         }
@@ -46,75 +147,33 @@ esp_err_t rc522_antenna_on() {
     return rc522_write(0x26, 0x60); // 43dB gain
 }
 
-esp_err_t rc522_init() {
-    esp_err_t ret = ESP_OK;
+/* Returns pointer to dynamically allocated array of two element */
+uint8_t* rc522_calculate_crc(uint8_t *data, uint8_t n) {
+    rc522_clear_bitmask(0x05, 0x04);
+    rc522_set_bitmask(0x0A, 0x80);
 
-    i2c_config_t i2c_cfg = {
-        .mode = I2C_MODE_MASTER,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = 100000,
-    };
-    ret = get_i2c_pins(I2C_NUM_0, &i2c_cfg);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    i2c_handle = i2c_bus_create(I2C_NUM_0, &i2c_cfg);
+    rc522_write_n(0x09, n, data);
 
-    // ---------- RW test ------------
-    ret = rc522_write(0x24, 0x25);
-    if (ret != ESP_OK) {
-        return ret;
+    rc522_write(0x01, 0x03);
+
+    uint8_t i = 255;
+    uint8_t nn = 0;
+
+    for(;;) {
+        nn = rc522_read(0x05);
+        i--;
+
+        if(! (i != 0 && ! (nn & 0x04))) {
+            break;
+        }
     }
-    assert(rc522_read(0x24) == 0x25);
-    ret = rc522_write(0x24, 0x26);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    assert(rc522_read(0x24) == 0x26);
+
+    uint8_t* res = (uint8_t*) malloc(2); 
     
-    // ------- Config --------
-    ret = rc522_write(0x01, 0x0F);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = rc522_write(0x2A, 0x8D);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = rc522_write(0x2B, 0x3E);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = rc522_write(0x2D, 0x1E);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = rc522_write(0x2C, 0x00);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = rc522_write(0x15, 0x40);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = rc522_write(0x11, 0x3D);
-    if (ret != ESP_OK) {
-        return ret;
-    }
+    res[0] = rc522_read(0x22);
+    res[1] = rc522_read(0x21);
 
-    ret = rc522_antenna_on();
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    printf("RC522 Firmware 0x%x\n", rc522_fw_version());
-
-    return ret;
-}
-
-esp_err_t rc522_clear() {
-    return i2c_bus_delete(i2c_handle);
+    return res;
 }
 
 uint8_t* rc522_card_write(uint8_t cmd, uint8_t *data, uint8_t n, uint8_t* res_n) {
@@ -183,35 +242,6 @@ uint8_t* rc522_card_write(uint8_t cmd, uint8_t *data, uint8_t n, uint8_t* res_n)
     return result;
 }
 
-/* Returns pointer to dynamically allocated array of two element */
-uint8_t* rc522_calculate_crc(uint8_t *data, uint8_t n) {
-    rc522_clear_bitmask(0x05, 0x04);
-    rc522_set_bitmask(0x0A, 0x80);
-
-    rc522_write_n(0x09, n, data);
-
-    rc522_write(0x01, 0x03);
-
-    uint8_t i = 255;
-    uint8_t nn = 0;
-
-    for(;;) {
-        nn = rc522_read(0x05);
-        i--;
-
-        if(! (i != 0 && ! (nn & 0x04))) {
-            break;
-        }
-    }
-
-    uint8_t* res = (uint8_t*) malloc(2); 
-    
-    res[0] = rc522_read(0x22);
-    res[1] = rc522_read(0x21);
-
-    return res;
-}
-
 uint8_t* rc522_request(uint8_t* res_n) {
     uint8_t* result = NULL;
     rc522_write(0x0D, 0x07);
@@ -275,4 +305,45 @@ uint8_t* rc522_get_tag() {
     }
 
     return NULL;
+}
+
+static void rc522_timer_callback(void* arg) {
+    uint8_t* serial_no = rc522_get_tag();
+
+    if(serial_no != NULL) {
+        rc522_tag_callback_t cb = (rc522_tag_callback_t) arg;
+        cb(serial_no);
+        free(serial_no);
+    }
+}
+
+esp_err_t rc522_start(rc522_start_args_t start_args) {
+    assert(rc522_spi_init(
+        start_args.miso_io, 
+        start_args.mosi_io, 
+        start_args.sck_io, 
+        start_args.sda_io) == ESP_OK);
+    
+    rc522_init();
+
+    const esp_timer_create_args_t timer_args = {
+        .callback = &rc522_timer_callback,
+        .arg = (void*) start_args.callback
+    };
+
+    esp_err_t ret = esp_timer_create(&timer_args, &rc522_timer);
+
+    if(ret != ESP_OK) {
+        return ret;
+    }
+
+    return rc522_resume();
+}
+
+esp_err_t rc522_resume() {
+    return rc522_timer_running ? ESP_OK : esp_timer_start_periodic(rc522_timer, 125000);
+}
+
+esp_err_t rc522_pause() {
+    return ! rc522_timer_running ? ESP_OK : esp_timer_stop(rc522_timer);
 }

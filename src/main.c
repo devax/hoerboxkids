@@ -196,43 +196,55 @@ audio_pipeline_handle_t pipeline;
 audio_element_handle_t fatfs_stream_reader;
 int no_tags_consecutively = 0;
 
-static void rfid_task(void *arg) { // requires sound_task!
-    ESP_ERROR_CHECK(rc522_init());
+char no[11];
+char previous_no[11];
 
-    char no[11];
-    char previous_no[11];
+void tag_handler(uint8_t* tag) {
+    for(int i = 0; i < 4; i++) {
+        printf("%02x ", tag[i]);
+    }
+    printf("\n");
+
     char sound_file[23];
     char missing_sound_file[28];
     previous_no[0] = 0;
+
     while(no_tags_consecutively < SHUTDOWN_IF_NO_TAGS_CONSECUTIVELY) {
-        uint8_t* tag = rc522_get_tag();
         no[0] = 0;
         if (tag != NULL) {
-            sprintf(no, "%02x%02x%02x%02x%02x", tag[0], tag[1], tag[2], tag[3], tag[4]);
+            sprintf(no, "%02x%02x%02x%02x", tag[0], tag[1], tag[2], tag[3]);
             sprintf(sound_file, "/sdcard/%s.mp3", no);
             sprintf(missing_sound_file, "%s_miss", sound_file);
-            /*printf("serial: ");
-            for(int i = 0; i < 5; i++) {
-                printf("%#x ", tag[i]);
-            }
-            printf("\n");*/
-            ESP_LOGD(TAG_RFID, "RFID tag found: %s", no);
-            free(tag);
+
+            ESP_LOGI(TAG_RFID, "RFID tag found: %s", no);
+            ESP_LOGD(TAG_RFID, "(DBG) RFID tag found: %s", no);
+
+            printf("%s\n", no);
+            printf("%s\n", sound_file);
+            printf("%s\n", missing_sound_file);
+
+            //free(tag);
             no_tags_consecutively = 0;
         } else {
             no_tags_consecutively++;
-            ESP_LOGD(TAG_RFID, "RFID tag not found, no_tags_consecutively=%d", no_tags_consecutively);
+            ESP_LOGI(TAG_RFID, "RFID tag not found, no_tags_consecutively=%d", no_tags_consecutively);
         }
 
         if (strcmp(previous_no, no) != 0) { // tag changed
-            // stop pipelie
-            audio_pipeline_stop(pipeline);
-            audio_pipeline_wait_for_stop(pipeline);
+            // stop pipeline
+            
+            // printf("%s\n", "Stopping pipeline");
+            // audio_pipeline_stop(pipeline);
+            // printf("%s\n", "Stopped");
+            // audio_pipeline_wait_for_stop(pipeline);
+
             if (no[0] == 0) {
                 ESP_LOGI(TAG_RFID, "Stop");
             } else {
                 // check if file extsist
+                printf("%s\n", "Trying open");
                 FILE *file = fopen(sound_file, "r");
+                printf("%s\n", "Opened");
                 if (file != NULL) { // file exists
                     fclose(file);
                     ESP_LOGI(TAG_RFID, "Play %s: %s", no, sound_file);
@@ -289,12 +301,112 @@ static void rfid_task(void *arg) { // requires sound_task!
         vTaskDelay(2000 / portTICK_RATE_MS);
     }
 
-    ESP_ERROR_CHECK(rc522_clear());
+    // ESP_ERROR_CHECK(rc522_clear());
 
     ESP_LOGI(TAG_RFID, "Bye");
 
     vTaskDelete(NULL);
 }
+
+// static void rfid_task_OLD(void *arg) { // requires sound_task!
+//     ESP_ERROR_CHECK(rc522_init());
+
+//     char no[11];
+//     char previous_no[11];
+//     char sound_file[23];
+//     char missing_sound_file[28];
+//     previous_no[0] = 0;
+//     while(no_tags_consecutively < SHUTDOWN_IF_NO_TAGS_CONSECUTIVELY) {
+//         uint8_t* tag = rc522_get_tag();
+//         no[0] = 0;
+//         if (tag != NULL) {
+//             sprintf(no, "%02x%02x%02x%02x%02x", tag[0], tag[1], tag[2], tag[3], tag[4]);
+//             sprintf(sound_file, "/sdcard/%s.mp3", no);
+//             sprintf(missing_sound_file, "%s_miss", sound_file);
+//             /*printf("serial: ");
+//             for(int i = 0; i < 5; i++) {
+//                 printf("%#x ", tag[i]);
+//             }
+//             printf("\n");*/
+//             ESP_LOGD(TAG_RFID, "RFID tag found: %s", no);
+//             free(tag);
+//             no_tags_consecutively = 0;
+//         } else {
+//             no_tags_consecutively++;
+//             ESP_LOGD(TAG_RFID, "RFID tag not found, no_tags_consecutively=%d", no_tags_consecutively);
+//         }
+
+//         if (strcmp(previous_no, no) != 0) { // tag changed
+//             // stop pipelie
+//             audio_pipeline_stop(pipeline);
+//             audio_pipeline_wait_for_stop(pipeline);
+//             if (no[0] == 0) {
+//                 ESP_LOGI(TAG_RFID, "Stop");
+//             } else {
+//                 // check if file extsist
+//                 FILE *file = fopen(sound_file, "r");
+//                 if (file != NULL) { // file exists
+//                     fclose(file);
+//                     ESP_LOGI(TAG_RFID, "Play %s: %s", no, sound_file);
+
+//                     // prepare pipeline
+//                     audio_element_set_uri(fatfs_stream_reader, sound_file);
+//                     audio_pipeline_reset_ringbuffer(pipeline);
+//                     audio_pipeline_reset_elements(pipeline);
+
+//                     // fetch offset
+//                     nvs_handle nvs_position;
+//                     esp_err_t ret1 = nvs_open("position", NVS_READONLY, &nvs_position);
+//                     if (ret1 == ESP_ERR_NVS_NOT_FOUND) {
+//                         ESP_LOGI(TAG_RFID, "No previous position found for %s", no);
+//                     } else if (ret1 == ESP_OK) {
+//                         int64_t position;
+//                         esp_err_t ret2 = nvs_get_i64(nvs_position, no, &position);
+//                         if (ret2 == ESP_ERR_NVS_NOT_FOUND) {
+//                             ESP_LOGI(TAG_RFID, "No previous position found for %s", no);
+//                         } else if (ret2 == ESP_OK) {
+//                             ESP_LOGI(TAG_RFID, "Previous position found for %s: %" PRId64, no, position);
+//                             audio_element_info_t info = {0};
+//                             audio_element_getinfo(fatfs_stream_reader, &info);
+//                             info.byte_pos = position;
+//                             audio_element_setinfo(fatfs_stream_reader, &info);
+//                         } else {
+//                             ESP_ERROR_CHECK(ret2);
+//                         }
+//                     } else {
+//                         ESP_ERROR_CHECK(ret1);
+//                     }
+//                     nvs_close(nvs_position);
+                    
+//                     // start mp3
+//                     audio_pipeline_run(pipeline);
+//                 } else { // file does not exist
+//                     ESP_LOGI(TAG_RFID, "Not found %s: %s", no, sound_file);
+
+//                     file = fopen(missing_sound_file, "w");
+//                     fclose(file);
+                    
+//                     // prepare pipeline
+//                     audio_element_set_uri(fatfs_stream_reader, "/sdcard/system_not_found.mp3");
+//                     audio_pipeline_reset_ringbuffer(pipeline);
+//                     audio_pipeline_reset_elements(pipeline);
+
+//                     // start mp3
+//                     audio_pipeline_run(pipeline);
+//                 }
+//             }
+
+//             strcpy(previous_no, no);
+//         }
+//         vTaskDelay(2000 / portTICK_RATE_MS);
+//     }
+
+//     ESP_ERROR_CHECK(rc522_clear());
+
+//     ESP_LOGI(TAG_RFID, "Bye");
+
+//     vTaskDelete(NULL);
+// }
 
 static void sound_task(void *arg) { // controlled by rfid_task
     audio_element_handle_t i2s_stream_writer, mp3_decoder;
@@ -348,8 +460,8 @@ static void sound_task(void *arg) { // controlled by rfid_task
     ESP_LOGD(TAG_SOUND, "Listening event from peripherals");
     audio_event_iface_set_listener(esp_periph_set_get_event_iface(set), evt);
 
-    TaskHandle_t rfid_handle = NULL;
-    xTaskCreate(rfid_task, "RFID", 4096, NULL, configMAX_PRIORITIES - 3, &rfid_handle);
+    // TaskHandle_t rfid_handle = NULL;
+    // xTaskCreate(rfid_task, "RFID", 4096, NULL, configMAX_PRIORITIES - 3, &rfid_handle);
 
     // read volume from NVS
     nvs_handle nvs_config;
@@ -693,13 +805,14 @@ static void list_sdcard_task(void *arg) {
 
 void app_main(void)
 {
-    esp_log_level_set("*", ESP_LOG_WARN);
-    esp_log_level_set(TAG, ESP_LOG_INFO);
-    esp_log_level_set(TAG_RFID, ESP_LOG_INFO);
+    //esp_log_level_set("*", ESP_LOG_WARN);
+    esp_log_level_set("*", ESP_LOG_INFO);
+    esp_log_level_set(TAG, ESP_LOG_DEBUG);
+    esp_log_level_set(TAG_RFID, ESP_LOG_DEBUG);
     esp_log_level_set(TAG_SOUND, ESP_LOG_INFO);
     esp_log_level_set(TAG_BEEP, ESP_LOG_INFO);
-    //esp_log_level_set("FATFS_STREAM", ESP_LOG_VERBOSE);
-    //esp_log_level_set("SDCARD", ESP_LOG_VERBOSE);
+    esp_log_level_set("FATFS_STREAM", ESP_LOG_DEBUG);
+    esp_log_level_set("SDCARD", ESP_LOG_DEBUG);
     //esp_log_level_set("AUDIO_BOARD", ESP_LOG_VERBOSE);
     //esp_log_level_set("PERIPH_BUTTON", ESP_LOG_VERBOSE);
     //esp_log_level_set("PERIPH_TOUCH", ESP_LOG_VERBOSE);
@@ -719,9 +832,27 @@ void app_main(void)
         default:
             ESP_LOGI(TAG, "hello");
     }
-    
+
+
+    const rc522_start_args_t start_args = {
+            .miso_io  = 19,
+            .mosi_io  = 23,
+            .sck_io   = 18,
+            .sda_io   = 5,
+            .callback = &tag_handler
+        };
+
+        printf("Starting RC522\n");
+        rc522_start(start_args);
+        printf("RC522 started");
+        printf("\n");
+
     //xTaskCreate(i2cscanner_task, "I2CScanner", 2048, NULL, configMAX_PRIORITIES - 3, NULL);
     //xTaskCreate(list_sdcard_task, "ListSDCard", 2048, NULL, configMAX_PRIORITIES - 3, NULL);
 
-    xTaskCreate(sound_task, "MP3", 4096, NULL, configMAX_PRIORITIES - 1, NULL);
+    //xTaskCreate(sound_task, "MP3", 4096, NULL, configMAX_PRIORITIES - 1, NULL);
+    while (true)
+    {
+        
+    }
 } 
